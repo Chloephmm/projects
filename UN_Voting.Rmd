@@ -1,0 +1,289 @@
+```{r}
+# Load tidyverse
+library("tidyverse")
+library(broom)
+library (tidyr)
+library(purrr)
+```
+
+```{r}
+#load countrycode library
+library(countrycode)
+```
+
+```{r}
+data <- readRDS("/Users/giangpham/Downloads/votes.rds")
+
+# Filter for votes that are "yes", "abstain", or "no"
+votes_processed <- data %>%
+  filter(data["vote"] <= 3) %>%
+
+# Adding a year column. Since the UN has started voting in 1946, and holds one session per year, we can get the year of a UN resolution by adding 1945 to the session number.
+  mutate(year=session + 1945,
+         # Add a country column (convert country code to country name)
+         country=countrycode(ccode, "cown", "country.name")
+         )
+
+```
+"Percentage of yes votes": If a country votes yes on most resolutions, we might infer that it tends to agree with the international consensus, while if it votes no, we could assume that it tends to go against it. 
+
+# Summarize the data:
+```{r}
+percent_yes <- votes_processed %>%
+  summarize(total = n(),
+            percent_yes=mean(vote==1)
+            )
+percent_yes
+```
+About 80% of votes that are "Yes" (the fraction of all votes in their history that were "Yes").
+
+Summarize the data by year:
+```{r}
+percent_yes_by_yr <- votes_processed %>%
+  group_by(year) %>%
+  summarize(total = n(),
+            percent_yes=mean(vote==1)
+            )
+percent_yes_by_yr
+```
+
+Summarize the data by country:
+```{r}
+percent_yes_by_country <- votes_processed %>%
+  group_by(country) %>%
+  summarize(total = n(),
+            percent_yes=mean(vote==1)
+            )
+percent_yes_by_country
+```
+# Sorting and filtering
+```{r}
+#Sorting in ascending order of percent_yes
+percent_yes_by_country%>%
+arrange(percent_yes)
+# Now sort in descending order
+percent_yes_by_country%>%
+arrange(desc(percent_yes))
+
+```
+The country that voted least frequently, Zanzibar, had only 2 votes in the entire dataset. Filter to remove fromm the sorted data countries that have fewer than 100 votes.
+
+```{r}
+percent_yes_by_country %>%
+  arrange(percent_yes) %>%
+  drop_na() %>%  # Drop any null values in the dataset
+  filter(total >= 100)
+```
+# Visualization
+```{r}
+# Line plot
+ggplot(percent_yes_by_yr, aes(x= year, y= percent_yes)) + geom_line()
+ #Scatter plot
+ggplot(percent_yes_by_yr, aes(year, percent_yes)) + geom_point()+
+  geom_smooth()
+```
+
+Same Plots
+
+```{r}
+# summarize by country and by year
+by_yr_country <- votes_processed %>%
+  group_by(year,country) %>%
+  summarize(total = n(),
+            percent_yes=mean(vote==1)
+            )
+by_yr_country
+
+# Filtering for multiple countries
+filtered_countries <- by_yr_country %>%
+  filter(country %in% c("United States", "United Kingdom",
+               "France", "India")
+         )
+filtered_countries
+
+# Visualizing vote trends by country (same plots)
+ggplot(filtered_countries, aes(x= year, y=percent_yes,
+       color=country) )+
+  geom_line()
+```
+Separated Plots
+```{r}
+# Visualizing vote trends by country (separated plots)
+ggplot(filtered_countries, aes(x= year, y=percent_yes,
+       color=country) )+
+  geom_line()+
+  facet_wrap(~country)
+
+```
+# Linear Regression
+(For United States)
+
+```{r}
+# Filter US
+unitedStates <- by_yr_country %>%
+  filter(country == "United States")
+
+# Fitting model to US
+model <- lm(percent_yes ~ year, data= unitedStates) #percent yes explained by year
+
+summary(model)
+
+```
+
+The estimated slope (-0.0062393) shows how much the year affects percent_yes. 
+```{r}
+# Tidy version
+tidy(model)
+
+# Nesting
+nested <- by_yr_country %>%
+  nest(-country)
+
+# Print the nested data for Brazil (row 7)
+nested$data[[7]]
+```
+```{r}
+# Unnest the data column to return it to its original form, so that the table again has one row for each country-year pair.
+nested %>%
+  unnest(data)
+
+  by_yr_country
+```
+
+```{r}
+# Fitting multiple models
+
+# Perform a linear regression on each item in the data column (Each nested dataset) & Add another mutate that applies tidy() to each model
+by_yr_country %>%
+  nest(-country) %>%
+  mutate(model = map(data, ~ lm(percent_yes ~ year, data = .)), 
+  tidied=map(model, tidy)) #Tidy each linear regression model (Use the map() function to apply the tidy() function to each linear model in the model column, creating a new column called tidied.)
+
+
+# After nesting, use the map() function within a mutate() to perform a linear regression on each dataset (i.e. each item in the data column in by_year_country) modeling percent_yes as a function of year. Save the results to the model column.
+
+
+# Add one more step that unnests the tidied column
+country_coefficients <- by_yr_country %>%
+  nest(-country) %>%
+  mutate(model = map(data, ~ lm(percent_yes ~ year, data = .)),
+         tidied = map(model, tidy)) %>%
+         unnest(tidied)
+
+# Print the resulting country_coefficients variable
+country_coefficients # A Model for each country.
+
+```
+```{r}
+# Working with many tidy models
+
+# Filter for the year term(slope)
+slope_terms <- country_coefficients %>%
+  filter(term == "year")
+# Only want to get the models that were statistically significant (p-value < 0.05)
+slope_terms %>%
+  mutate(p.adjusted = p.adjust(p.value)) %>% # Add new column 
+  filter(p.adjusted < .05)
+
+# Filtering by adjusted p-values
+filtered_countries <- country_coefficients %>%
+  filter(term=="year")%>%
+  mutate (p.adjusted=p.adjust(p.value))%>%
+  filter(p.adjusted < .05)
+
+# Sorting for the countries increasing most quickly
+filtered_countries%>%
+  arrange(desc(estimate))
+
+# Sorting for the countries decreasing most quickly
+filtered_countries%>%
+  arrange(estimate)
+
+```
+
+# Joining and Tidying
+
+```{r}
+descriptions <- readRDS("/Users/giangpham/Downloads/descriptions.rds")
+
+# Inner join
+votes_joined <- votes_processed%>%
+  inner_join(descriptions,by=c("rcid","session"))
+
+# Filter the votes_joined dataset for votes relating to colonialism 
+votes_joined %>%
+  filter(co==1)  #each contains a 1 if the resolution is related to this topic and a 0 otherwise. 
+
+# Filter, then summarize by year: US_co_by_year
+US_co_by_year <- votes_joined %>%
+  filter(country == "United States", co == 1) %>% # only for votes related to colonialism
+  group_by(year) %>%
+  summarize(percent_yes = mean(vote == 1))
+
+# Graph the % of "yes" votes over time
+ggplot(US_co_by_year, aes(year, percent_yes)) +
+  geom_line()
+
+```
+```{r}
+# Tidy data
+votes_gathered <- votes_joined %>%
+  gather(topic, has_topic, me:ec) %>%
+  filter(has_topic ==1)
+
+# Recording the topics
+votes_tidied <- votes_gathered %>%
+  mutate(topic = recode(topic,
+                        me = "Palestinian conflict",
+                        nu = "Nuclear weapons and nuclear material",
+                        di = "Arms control and disarmament",
+                        hr = "Human rights",
+                        co = "Colonialism",
+                        ec = "Economic development"))
+```
+```{r}
+# Summarize the percentage "yes" per country-year-topic
+by_country_year_topic <- votes_tidied %>%
+  group_by(country, year, topic) %>%
+  summarize(total = n(), percent_yes = mean(vote == 1)) %>%
+  ungroup()
+by_country_year_topic
+```
+```{r}
+# Filter by_country_year_topic for just the US
+US_by_country_year_topic <- by_country_year_topic %>%
+  filter(country == "United States")
+
+# Plot % yes over time for the US, faceting by topic
+ggplot(US_by_country_year_topic, aes(year, percent_yes)) +
+  geom_line() +
+  facet_wrap(~ topic)
+
+# Fit model on the by_country_year_topic dataset
+country_topic_coefficients <- by_country_year_topic %>%
+  nest(-country, -topic) %>%
+  mutate(model = map(data, ~ lm(percent_yes ~ year, data = .)),
+         tidied = map(model, tidy)) %>%
+  unnest(tidied)
+
+# Print country_topic_coefficients
+country_topic_coefficients
+```
+```{r}
+# Extract only cases that are statistically significant (adjusting the p-value for the number of models, and then filtering to include only significant changes)
+country_topic_filtered <- country_topic_coefficients %>%
+  filter(term=="year")%>%
+  mutate (p.adjusted=p.adjust(p.value))%>%
+  filter(p.adjusted < .05)
+
+# Over its history, Vanuatu (an island nation in the Pacific Ocean) sharply changed its pattern of voting on the topic of Palestinian conflict. We can examine this country's voting patterns more closely.
+# Create vanuatu_by_country_year_topic
+vanuatu_by_country_year_topic <- by_country_year_topic %>%
+  filter(country == "Vanuatu")
+
+# Plot of percentage "yes" over time, faceted by topic
+ggplot(vanuatu_by_country_year_topic, aes(year, percent_yes)) +
+  geom_line() +
+  facet_wrap(~ topic)
+```
+
